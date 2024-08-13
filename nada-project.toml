@@ -1,0 +1,7 @@
+name = "Diabetes_Prediction_Model"
+version = "0.1.0"
+authors = [""]
+
+[[programs]]
+path = "src/Prediction_Model.py"
+prime_size = 128
