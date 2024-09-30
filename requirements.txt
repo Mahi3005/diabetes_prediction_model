@@ -8,3 +8,4 @@ py-nillion-client==0.5.0
 nada-dsl==0.5.0
 nada-numpy==0.4.0
 nada-ai==0.4.0
+streamlit
