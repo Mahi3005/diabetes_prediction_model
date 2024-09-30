@@ -11,16 +11,20 @@ from cosmpy.aerial.client import LedgerClient
 from cosmpy.aerial.wallet import LocalWallet
 from cosmpy.crypto.keypairs import PrivateKey
 from dotenv import load_dotenv
-from nillion_utils import compute, store_program, store_secrets, get_user_id_by_seed  # local helper file
+from nillion_utils import compute, store_program, store_secrets, get_user_id_by_seed
 from nada_ai.client import SklearnClient
-
-# Your code where SklearnClient is used
-
+from sklearn.linear_model import LinearRegression
+import streamlit as st
 
 # Load environment variables from a .env file
 load_dotenv()
 
-async def main():
+# Constants
+MAX_RETRIES = 5
+INITIAL_RETRY_DELAY = 1  # seconds
+MAX_RETRY_DELAY = 30  # seconds
+
+async def setup_nillion():
     try:
         # Set log scale to match the precision set in the nada program
         na.set_log_scale(32)
@@ -71,12 +75,12 @@ async def main():
 
         # Load the transformed dataset
         data = pd.read_csv('./diabetes-transformed.csv')
-        features = ['Pregnancies', 'Glucose', 'BloodPressure', 'SkinThickness', 'Insulin', 'BMI', 'DiabetesPedigreeFunction', 'Age']
+        features = ['Pregnancies', 'Glucose', 'BloodPressure', 'SkinThickness', 'Insulin', 'BMI',
+                    'DiabetesPedigreeFunction', 'Age']
         X = data[features].values
         y = data['Outcome'].values
 
         # Train the Model
-        from sklearn.linear_model import LinearRegression
         model = LinearRegression()
         model.fit(X, y)
 
@@ -103,8 +107,14 @@ async def main():
             permissions_for_model_secrets,
         )
 
-        # Party1 creates the new input secret
-        new_patient_data = [6, 148, 72, 35, 0, 33.6, 0.627, 50]  # Example input
+        return client_1, payments_wallet, payments_client, program_id, cluster_id, party_names, party_id_0, party_id_1, model_store_id
+    except Exception as e:
+        st.error(f"Failed to set up the secure computation environment. Error: {str(e)}")
+        raise
+
+async def predict_diabetes(client_1, payments_wallet, payments_client, program_id, cluster_id, party_names, party_id_0,
+                           party_id_1, model_store_id, new_patient_data):
+    try:
         new_patient_array = np.array(new_patient_data)
         my_input = na_client.array(new_patient_array, "my_input", na.SecretRational)
         input_secrets = nillion.NadaValues(my_input)
@@ -114,9 +124,6 @@ async def main():
         compute_bindings.add_input_party(party_names[0], party_id_0)
         compute_bindings.add_input_party(party_names[1], party_id_1)
         compute_bindings.add_output_party(party_names[1], party_id_1)
-
-        print(f"Computing using program {program_id}")
-        print(f"Use secret store_id: {model_store_id}")
 
         # Party1 performs blind computation that runs inference and returns the result
         inference_result = await compute(
@@ -132,29 +139,110 @@ async def main():
         )
 
         # Rescale the obtained result
-        outputs = [na_client.float_from_rational(inference_result["my_output"])]
-        print(f"🙈 The rescaled result computed by the {program_name} Nada program is {outputs[0]}")
-        expected = model.predict(new_patient_array.reshape(1, -1))
-        print(f"👀 The expected result computed by sklearn is {expected[0]}")
-
-        print(f"""
-        Features of new input data:
-            Pregnancies: {new_patient_data[0]}
-            Glucose level: {new_patient_data[1]}
-            Blood Pressure: {new_patient_data[2]}
-            Skin Thickness: {new_patient_data[3]}
-            Insulin level: {new_patient_data[4]}
-            BMI: {new_patient_data[5]}
-            Diabetes Pedigree Function: {new_patient_data[6]}
-            Age: {new_patient_data[7]}
-        """)
-        print(f"The predicted outcome for this patient is: {'Positive' if outputs[0] > 0.5 else 'Negative'}")
-
-        return inference_result
-
+        output = na_client.float_from_rational(inference_result["my_output"])
+        return output
+    except asyncio.TimeoutError:
+        st.error("The prediction operation timed out. Please try again.")
+        raise
     except Exception as e:
-        print(f"An error occurred: {e}")
+        st.error(f"An error occurred during prediction: {str(e)}")
+        raise
 
-# Run the main function if the script is executed directly
+async def retry_operation(operation, max_retries=MAX_RETRIES):
+    for attempt in range(max_retries):
+        try:
+            return await asyncio.wait_for(operation(), timeout=30)  # 30-second timeout
+        except asyncio.TimeoutError:
+            if attempt == max_retries - 1:
+                raise
+            delay = min(INITIAL_RETRY_DELAY * (2 ** attempt), MAX_RETRY_DELAY)
+            st.warning(f"Operation timed out. Retrying in {delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+            await asyncio.sleep(delay)
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            delay = min(INITIAL_RETRY_DELAY * (2 ** attempt), MAX_RETRY_DELAY)
+            st.warning(f"Operation failed. Retrying in {delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+            await asyncio.sleep(delay)
+
+def clear_results():
+    if 'prediction' in st.session_state:
+        del st.session_state['prediction']
+    if 'risk_level' in st.session_state:
+        del st.session_state['risk_level']
+
+def main():
+    st.set_page_config(page_title="Diabetes Risk Predictor", page_icon="🩺", layout="wide")
+
+    st.title("🩺 Diabetes Risk Prediction Model")
+    st.write("Enter patient data to predict diabetes risk. This model uses secure computation to protect your data.")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        pregnancies = st.number_input("Number of Pregnancies", min_value=0, max_value=20, value=0)
+        glucose = st.number_input("Glucose Level (mg/dL)", min_value=0, max_value=300, value=100)
+        blood_pressure = st.number_input("Blood Pressure (mm Hg)", min_value=0, max_value=200, value=70)
+        skin_thickness = st.number_input("Skin Thickness (mm)", min_value=0, max_value=100, value=20)
+
+    with col2:
+        insulin = st.number_input("Insulin Level (mu U/ml)", min_value=0, max_value=1000, value=79)
+        bmi = st.number_input("BMI", min_value=0.0, max_value=70.0, value=25.0, format="%.1f")
+        diabetes_pedigree = st.number_input("Diabetes Pedigree Function", min_value=0.0, max_value=2.5, value=0.3,
+                                            format="%.3f")
+        age = st.number_input("Age", min_value=0, max_value=120, value=30)
+
+    if st.button("Predict Risk", key="predict_button"):
+        clear_results()  # Clear previous predictions
+        new_patient_data = [pregnancies, glucose, blood_pressure, skin_thickness, insulin, bmi, diabetes_pedigree, age]
+
+        if 'nillion_setup' not in st.session_state:
+            with st.spinner("Setting up secure computation environment..."):
+                try:
+                    st.session_state.nillion_setup = asyncio.run(retry_operation(setup_nillion))
+                except Exception as e:
+                    st.error(f"Failed to set up the secure computation environment. Please try again later. Error: {str(e)}")
+                    return
+
+        with st.spinner("Performing secure prediction..."):
+            try:
+                client_1, payments_wallet, payments_client, program_id, cluster_id, party_names, party_id_0, party_id_1, model_store_id = st.session_state.nillion_setup
+                prediction = asyncio.run(retry_operation(lambda: predict_diabetes(
+                    client_1, payments_wallet, payments_client, program_id, cluster_id, party_names,
+                    party_id_0, party_id_1, model_store_id, new_patient_data)))
+                st.session_state['prediction'] = prediction
+                st.session_state['risk_level'] = "High" if prediction > 0.6 else "Moderate" if prediction > 0.4 else "Low"
+            except Exception as e:
+                st.error(f"Failed to perform the prediction. Please try again later. Error: {str(e)}")
+                return
+
+    if 'prediction' in st.session_state and 'risk_level' in st.session_state:
+        st.subheader("Prediction Result")
+        color = "red" if st.session_state['risk_level'] == "High" else "orange" if st.session_state['risk_level'] == "Moderate" else "green"
+
+        st.markdown(f"<h3 style='color: {color};'>Risk Level: {st.session_state['risk_level']}</h3>",
+                    unsafe_allow_html=True)
+        st.write(f"Prediction value: {st.session_state['prediction']:.4f}")
+
+        st.info(
+            "Please note that this prediction is based on a machine learning model and should not be considered as a medical diagnosis. Always consult with a healthcare professional for proper medical advice.")
+
+    st.sidebar.title("About")
+    st.sidebar.info(
+        "This app uses a secure computation framework to predict diabetes risk "
+        "while keeping your data private. The prediction is made using a linear "
+        "regression model trained on the Pima Indians Diabetes Database."
+    )
+    st.sidebar.warning(
+        "Disclaimer: This tool is for educational purposes only and should not "
+        "be used as a substitute for professional medical advice, diagnosis, or treatment."
+    )
+
+    if st.sidebar.button("Clear Results and Reset"):
+        clear_results()
+        if 'nillion_setup' in st.session_state:
+            del st.session_state['nillion_setup']
+        st.rerun()
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
