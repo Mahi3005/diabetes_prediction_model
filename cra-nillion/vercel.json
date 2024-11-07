@@ -2,10 +2,10 @@
   "version": 2,
   "builds": [
     {
-      "src": "package.json",
-      "use": "@vercel/static-build",
+      "src": "main.py",
+      "use": "@vercel/python",
       "config": {
-        "distDir": "dist"
+        "runtime": "python3.9"
       }
     }
   ],
